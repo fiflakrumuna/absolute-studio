@@ -1,77 +1,508 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { open } from "@tauri-apps/plugin-dialog";
+import { AgentStepLog, Message, ProviderConfig, ThemeConfig } from "./types/chat";
+import { TopBar } from "./components/TopBar";
+import { SettingsSidebar } from "./components/SettingsSidebar";
+import { ChatWindow } from "./components/ChatWindow";
+import { ChatInput } from "./components/ChatInput";
+import "./App.css";
 
+const THEMES: Record<string, ThemeConfig> = {
+  matrix: {
+    bgMain: "#0a0e0a",
+    bgPanel: "#111811",
+    border: "#1f3a1f",
+    text: "#d4f7d4",
+    muted: "#5c8a5c",
+    accent: "#00ff41",
+    accent2: "#1b691b",
+  },
+  amber: {
+    bgMain: "#0f0b05",
+    bgPanel: "#1a1308",
+    border: "#3d2c11",
+    text: "#ffe8c2",
+    muted: "#8c6930",
+    accent: "#ffb000",
+    accent2: "#493a18",
+  },
+  cyber: {
+    bgMain: "#090a14",
+    bgPanel: "#111326",
+    border: "#25294a",
+    text: "#e0e6ff",
+    muted: "#646e9e",
+    accent: "#00f0ff",
+    accent2: "#1e5053",
+  },
+  minimal: {
+    bgMain: "#18181b",
+    bgPanel: "#27272a",
+    border: "#3f3f46",
+    text: "#f4f4f5",
+    muted: "#a1a1aa",
+    accent: "#3b82f6",
+    accent2: "#1f3d6e",
+  },
+  clean: {
+    bgMain: "#ffffff",
+    bgPanel: "#f7f7f7",
+    border: "#c9c9c9",
+    text: "#5a5a5a",
+    muted: "#222222",
+    accent: "#4688bd",
+    accent2: "#0c4a7c",
+  },
+};
 
-// 1. Typ wiadomości - musi pasować 1:1 do Twojej struktury `Message` w Ruście!
-interface Message {
-  role: string;
-  content: string;
+function buildSystemPrompt(workspacePath: string): Message {
+  if (!workspacePath) {
+    return {
+      role: "system",
+      content:
+        "You are an expert software architect and coding assistant inside Absolute Studio. " +
+        "No local workspace directory is currently mounted, so provide clean code blocks in chat and remind the user they can click WORKSPACE: NONE at the bottom if they want you to write and test files directly on disk.",
+    };
+  }
+
+  return {
+    role: "system",
+    content: `You are an autonomous coding agent operating inside Absolute Studio on Windows.
+A workspace directory IS CURRENTLY MOUNTED (${workspacePath}). You have full read, write, and terminal execution tools.
+Never claim you lack access to files or the system.
+
+To use a tool, output ONLY ONE tool block per turn and wait for TOOL_RESULT:
+
+1. List all files in workspace:
+\`\`\`tool
+{"tool": "list_files"}
+\`\`\`
+
+2. Read any file:
+\`\`\`tool
+{"tool": "read_file", "path": "README.md"}
+\`\`\`
+
+3. Write/create a file directly on disk (ALWAYS use this exact code-fence format, NEVER JSON):
+\`\`\`write_file: main.cpp
+#include <iostream>
+
+int main() {
+    std::cout << "Hello\\n";
+    return 0;
+}
+\`\`\`
+
+4. Run a terminal command (compile, test, run script):
+\`\`\`tool
+{"tool": "run_command", "command": "g++ main.cpp -o main.exe && main.exe"}
+\`\`\`
+
+STRICT RULES:
+- Because a workspace is mounted, ALWAYS write generated code directly to files on disk using \`\`\`write_file: filename\`\`\` blocks BEFORE running any command.
+- Keep code concise, clean, and under 80 lines (prefer console/ASCII output unless GUI/file export is explicitly requested) so responses never truncate.
+- Output ONLY ONE tool block per response, wait for TOOL_RESULT, and only then run \`run_command\`.
+- On Windows cmd.exe, run executables directly (e.g., \`main.exe\`, NEVER \`./main.exe\`).
+- Only after all files are written and verified, respond in plain text summarizing what you created and the execution output.`,
+  };
 }
 
+const MAX_AGENT_STEPS = 12;
+
 function App() {
-  // Pamięć komponentu (stany)
+  const [messages, setMessages] = useState<Message[]>([]);
   const [prompt, setPrompt] = useState("");
-  const [odpowiedz, setOdpowiedz] = useState("");
-  const [ladowanie, setLadowanie] = useState(false);
+  const [isLoading, setIsLoading] = useState(false);
+  const [isSidebarOpen, setIsSidebarOpen] = useState(false);
 
-  // Funkcja wywoływana po kliknięciu przycisku "Wyślij"
-  async function wyslijZapytanie() {
-    if (!prompt.trim()) return; // Nie wysyłaj pustego tekstu
+  const [workspacePath, setWorkspacePath] = useState("");
+  const [workspaceStatus, setWorkspaceStatus] = useState<string | null>(null);
 
-    setLadowanie(true);
-    setOdpowiedz("");
+  const [isLocal, setIsLocal] = useState(true);
+  const [apiKey, setApiKey] = useState("");
+  const [model, setModel] = useState("qwen3.5:9b");
+
+  const [themeKey, setThemeKey] = useState("clean");
+  const [customAccent, setCustomAccent] = useState("#4688bd");
+  const [customAccent2, setCustomAccent2] = useState("#0c4a7c");
+  const [fontFamily, setFontFamily] = useState("'Consolas', 'Courier New', monospace");
+
+  useEffect(() => {
+    const theme = THEMES[themeKey];
+    const root = document.documentElement;
+    root.style.setProperty("--bg-main", theme.bgMain);
+    root.style.setProperty("--bg-panel", theme.bgPanel);
+    root.style.setProperty("--border-color", theme.border);
+    root.style.setProperty("--text-main", theme.text);
+    root.style.setProperty("--text-muted", theme.muted);
+    root.style.setProperty("--accent", customAccent);
+    root.style.setProperty("--accent2", customAccent2);
+    root.style.setProperty("--accent-glow", `${customAccent}33`);
+  }, [themeKey, customAccent]);
+
+  useEffect(() => {
+    document.documentElement.style.setProperty("--font-current", fontFamily);
+  }, [fontFamily]);
+
+  const showTempStatus = (msg: string) => {
+    setWorkspaceStatus(msg);
+    setTimeout(() => setWorkspaceStatus(null), 4000);
+  };
+
+  const handleSelectWorkspace = async () => {
+    const selected = await open({
+      directory: true,
+      multiple: false,
+      title: "Select Project Workspace Directory",
+    });
+
+    if (typeof selected === "string") {
+      setWorkspacePath(selected);
+      showTempStatus("[WORKSPACE MOUNTED]");
+    }
+  };
+
+  const handleClearWorkspace = () => {
+    setWorkspacePath("");
+    showTempStatus("[WORKSPACE UNMOUNTED]");
+  };
+
+  const executeAgentTool = async (
+    rawToolJson: string
+  ): Promise<{ resultText: string; log: AgentStepLog }> => {
+    if (!workspacePath) {
+      const err =
+        "ERROR: No workspace directory is mounted. Ask the user to click WORKSPACE: NONE at the bottom first.";
+      return {
+        resultText: err,
+        log: { tool: "error", target: "workspace", output: err, isError: true },
+      };
+    }
 
     try {
-      // Przygotowujemy tablicę z jedną wiadomością (taką jak oczekuje Rust: Vec<Message>)
-      const historia: Message[] = [
-        { role: "user", content: prompt }
-      ];
+      const parsed = JSON.parse(rawToolJson);
 
-      // --- TWOJE ZADANIE A: Wywołaj komendę Rusta ---
-      // Użyj: await invoke<string>("NAZWA_FUNKCJI_Z_RUSTA", { messages: historia, model: "qwen3.5:9b" })
-      const wynik = await invoke<string>("send_message", {
-        messages: historia,
-        model: "qwen3.5:9b",
-      });
+      switch (parsed.tool) {
+        case "list_files": {
+          setWorkspaceStatus("[AGENT: LISTING FILES...]");
+          const out = await invoke<string>("list_workspace_files", {
+            workspace: workspacePath,
+          });
+          return {
+            resultText: out,
+            log: {
+              tool: "list_files",
+              target: "workspace",
+              output: out || "(empty)",
+              isError: false,
+            },
+          };
+        }
 
-      // Zapisujemy odpowiedź modelu w stanie, żeby wyświetliła się na ekranie
-      setOdpowiedz(wynik);
-    } catch (blad) {
-      // Jeśli Rust zwróci Err(...), wyświetlimy błąd tutaj
-      setOdpowiedz("Błąd: " + String(blad));
+        case "read_file": {
+          setWorkspaceStatus(`[AGENT: READING ${parsed.path}...]`);
+          const out = await invoke<string>("read_workspace_file", {
+            workspace: workspacePath,
+            relativePath: parsed.path,
+          });
+          return {
+            resultText: out,
+            log: {
+              tool: "read_file",
+              target: parsed.path,
+              output: out,
+              isError: false,
+            },
+          };
+        }
+
+        case "write_file": {
+          setWorkspaceStatus(`[AGENT: WRITING ${parsed.path}...]`);
+          const out = await invoke<string>("write_workspace_file", {
+            workspace: workspacePath,
+            relativePath: parsed.path,
+            content: parsed.content,
+          });
+          return {
+            resultText: out,
+            log: {
+              tool: "write_file",
+              target: parsed.path,
+              output: out,
+              isError: false,
+            },
+          };
+        }
+
+        case "run_command": {
+          setWorkspaceStatus(`[AGENT: RUNNING '${parsed.command}'...]`);
+          const out = await invoke<string>("run_workspace_command", {
+            workspace: workspacePath,
+            command: parsed.command,
+          });
+          const failed = !out.startsWith("EXIT_CODE: 0");
+          return {
+            resultText: out,
+            log: {
+              tool: "run_command",
+              target: parsed.command,
+              output: out,
+              isError: failed,
+            },
+          };
+        }
+
+        default: {
+          const err = `ERROR: Unknown tool '${parsed.tool}'.`;
+          return {
+            resultText: err,
+            log: {
+              tool: "unknown",
+              target: String(parsed.tool),
+              output: err,
+              isError: true,
+            },
+          };
+        }
+      }
+    } catch (err) {
+      const msg = `TOOL EXECUTION ERROR: ${String(err)}`;
+      return {
+        resultText: msg,
+        log: { tool: "parse_error", target: "json", output: msg, isError: true },
+      };
+    }
+  };
+
+  const handleThemeChange = (newTheme: string) => {
+    setThemeKey(newTheme);
+    setCustomAccent(THEMES[newTheme].accent);
+    setCustomAccent2(THEMES[newTheme].accent2);
+  };
+
+  const handleModeChange = (local: boolean) => {
+    setIsLocal(local);
+    setModel(local ? "qwen3.5:9b" : "anthropic/claude-3.7-sonnet");
+  };
+
+  async function handleSend() {
+    if (!prompt.trim() || isLoading) return;
+
+    const userMessage: Message = { role: "user", content: prompt };
+    let conversation = [...messages, userMessage];
+
+    setMessages(conversation);
+    setPrompt("");
+    setIsLoading(true);
+
+    const systemPrompt = buildSystemPrompt(workspacePath);
+
+    const config: ProviderConfig = isLocal
+      ? {
+          base_url: "http://localhost:11434/v1/chat/completions",
+          api_key: null,
+          model,
+          think: false,
+        }
+      : {
+          base_url: "https://openrouter.ai/api/v1/chat/completions",
+          api_key: apiKey,
+          model,
+          think: null,
+        };
+
+    try {
+      let steps = 0;
+      const accumulatedLogs: AgentStepLog[] = [];
+      const accumulatedThoughts: string[] = [];
+
+      while (steps < MAX_AGENT_STEPS) {
+        steps++;
+
+        const apiMessages = [systemPrompt, ...conversation].map(
+          ({ role, content }, index, arr) => {
+            if (index === arr.length - 1 && role === "user") {
+              if (workspacePath) {
+                return {
+                  role,
+                  content: `[SYSTEM CONTEXT: Workspace "${workspacePath}" is mounted. First write the file with \`\`\`write_file: path\`\`\`, wait for TOOL_RESULT, then run it.]\n\n${content}`,
+                };
+              } else {
+                return {
+                  role,
+                  content: `[SYSTEM CONTEXT: No workspace is currently mounted. Do NOT output write_file or tool blocks; provide normal code blocks in chat.]\n\n${content}`,
+                };
+              }
+            }
+            return { role, content };
+          }
+        );
+
+        const rawResponse = await invoke<string>("send_message", {
+          messages: apiMessages,
+          config,
+        });
+
+        let cleanResponse = rawResponse;
+        const thinkMatch = cleanResponse.match(/<think>([\s\S]*?)<\/think>/);
+        if (thinkMatch) {
+          accumulatedThoughts.push(thinkMatch[1].trim());
+          cleanResponse = cleanResponse.replace(/<think>[\s\S]*?<\/think>/, "").trim();
+        }
+
+        let normalizedResponse = cleanResponse;
+        const fenceCount = (normalizedResponse.match(/```/g) || []).length;
+        if (fenceCount % 2 === 1) {
+          normalizedResponse += "\n```";
+        }
+
+        const codeBlockRegex = /```([^\r\n`]*)\r?\n([\s\S]*?)```/g;
+        const toolPayloads: string[] = [];
+        let blockMatch: RegExpExecArray | null;
+
+        while ((blockMatch = codeBlockRegex.exec(normalizedResponse)) !== null) {
+          const header = blockMatch[1].trim();
+          const body = blockMatch[2];
+
+          if (header.startsWith("write_file:")) {
+            const path = header.replace("write_file:", "").trim();
+            toolPayloads.push(JSON.stringify({ tool: "write_file", path, content: body }));
+            continue;
+          }
+
+          if (header === "tool") {
+            const jsonLines = body
+              .split(/\r?\n/)
+              .map((line) => line.trim())
+              .filter((line) => line.startsWith("{") && line.endsWith("}"));
+
+            if (jsonLines.length > 0) {
+              toolPayloads.push(...jsonLines);
+            } else {
+              toolPayloads.push(body.trim());
+            }
+            continue;
+          }
+
+          const lines = body.split(/\r?\n/);
+          const firstLine = lines[0]?.trim() || "";
+
+          if (firstLine.startsWith("write_file:")) {
+            const path = firstLine.replace("write_file:", "").trim();
+            const content = lines.slice(1).join("\n");
+            toolPayloads.push(JSON.stringify({ tool: "write_file", path, content }));
+          } else if (firstLine.startsWith("run_command:")) {
+            const command = firstLine.replace("run_command:", "").trim();
+            toolPayloads.push(JSON.stringify({ tool: "run_command", command }));
+          } else if (firstLine.startsWith("read_file:")) {
+            const path = firstLine.replace("read_file:", "").trim();
+            toolPayloads.push(JSON.stringify({ tool: "read_file", path }));
+          } else if (firstLine === "list_files") {
+            toolPayloads.push(JSON.stringify({ tool: "list_files" }));
+          }
+        }
+
+        if (toolPayloads.length > 0) {
+          const stepResults: string[] = [];
+
+          for (const payload of toolPayloads) {
+            const { resultText, log } = await executeAgentTool(payload);
+            accumulatedLogs.push(log);
+            stepResults.push(resultText);
+          }
+
+          conversation = [
+            ...conversation,
+            { role: "assistant", content: rawResponse, hiddenFromUi: true },
+            {
+              role: "user",
+              content: `TOOL_RESULT:\n${stepResults.join("\n---\n")}`,
+              hiddenFromUi: true,
+            },
+          ];
+
+          setMessages([
+            ...conversation,
+            {
+              role: "assistant",
+              content: "",
+              agentLogs: [...accumulatedLogs],
+              thoughtProcess: accumulatedThoughts.join("\n\n---\n\n") || undefined,
+            },
+          ]);
+        } else {
+          const finalAssistantMsg: Message = {
+            role: "assistant",
+            content: cleanResponse,
+            agentLogs: accumulatedLogs.length > 0 ? accumulatedLogs : undefined,
+            thoughtProcess: accumulatedThoughts.join("\n\n---\n\n") || undefined,
+          };
+
+          conversation = [...conversation, finalAssistantMsg];
+          setMessages(conversation);
+          break;
+        }
+      }
+    } catch (error) {
+      setMessages((prev) => [
+        ...prev,
+        { role: "assistant", content: `[SYSTEM ERROR]: ${String(error)}` },
+      ]);
     } finally {
-      setLadowanie(false);
+      setIsLoading(false);
+      setWorkspaceStatus(null);
     }
   }
 
-  // Wygląd okna (HTML wewnątrz Reacta)
   return (
-    <div style={{ padding: "20px", fontFamily: "sans-serif" }}>
-      <h2>Absolute Studio - Test</h2>
-
-      {/* Pole tekstowe powiązane ze stanem `prompt` */}
-      <textarea
-        rows={4}
-        style={{ width: "100%", padding: "10px" }}
-        placeholder="Napisz polecenie dla modelu..."
-        value={prompt}
-        onChange={(e) => setPrompt(e.target.value)}
+    <div className="app-container">
+      <TopBar
+        isSidebarOpen={isSidebarOpen}
+        onToggleSidebar={() => setIsSidebarOpen((prev) => !prev)}
+        isLocal={isLocal}
+        model={model}
       />
 
-      <br /><br />
+      <div className="main-layout">
+        <SettingsSidebar
+          isOpen={isSidebarOpen}
+          onClose={() => setIsSidebarOpen(false)}
+          isLocal={isLocal}
+          onModeChange={handleModeChange}
+          apiKey={apiKey}
+          setApiKey={setApiKey}
+          model={model}
+          setModel={setModel}
+          themeKey={themeKey}
+          onThemeChange={handleThemeChange}
+          customAccent={customAccent}
+          setCustomAccent={setCustomAccent}
+          fontFamily={fontFamily}
+          setFontFamily={setFontFamily}
+          onClearChat={() => setMessages([])}
+        />
 
-      {/* Przycisk wywołujący naszą funkcję */}
-      <button onClick={wyslijZapytanie} disabled={ladowanie}>
-        {ladowanie ? "Model myśli..." : "Wyślij do Ollamy"}
-      </button>
+        <div className="workspace-main">
+          <ChatWindow
+            messages={messages}
+            isLoading={isLoading}
+            isLocal={isLocal}
+            model={model}
+          />
 
-      {/* Wyświetlenie odpowiedzi */}
-      {odpowiedz && (
-        <div style={{ marginTop: "20px", padding: "15px", background: "#222", color: "#fff", whiteSpace: "pre-wrap" }}>
-          <strong>Odpowiedź AI:</strong>
-          <p>{odpowiedz}</p>
+          <ChatInput
+            prompt={prompt}
+            setPrompt={setPrompt}
+            onSend={handleSend}
+            isLoading={isLoading}
+            workspacePath={workspacePath}
+            onSelectWorkspace={handleSelectWorkspace}
+            onClearWorkspace={handleClearWorkspace}
+            workspaceStatus={workspaceStatus}
+          />
         </div>
-      )}
+      </div>
     </div>
   );
 }
