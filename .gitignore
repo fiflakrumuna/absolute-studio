@@ -7,7 +7,7 @@ yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
 .vscode/
-
+target/
 node_modules
 dist
 dist-ssr
