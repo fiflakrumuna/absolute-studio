@@ -1,0 +1,8 @@
+Przyczyny "Brak odpowiedzi/Not responding" w release (po kompilacji), które nie występują w dev:
+
+1. **Optymalizacja kodu (Release vs Debug)**
+   - W trybie Release kompilator optymalizuje kod, co może prowadzić do:
+     - Usuwania zmiennych "niepotrzebnych" (np. `volatile` jest kluczowe dla flagi zakończenia pętli)
+     - Reordering instrukcji (może zmienić kolejność dostępu do pamięci)
+   - **Rozwiązanie:** Użyj `volatile` dla zmiennych kontrolujących pętle, np.:
+     

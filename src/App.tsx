@@ -1,7 +1,7 @@
 import { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
-import { AgentStepLog, Message, ProviderConfig, ThemeConfig } from "./types/chat";
+import type { AgentStepLog, Message, ProviderConfig, ThemeConfig } from "./types/chat";
 import { TopBar } from "./components/TopBar";
 import { SettingsSidebar } from "./components/SettingsSidebar";
 import { ChatWindow } from "./components/ChatWindow";
@@ -108,7 +108,7 @@ STRICT RULES:
   };
 }
 
-const MAX_AGENT_STEPS = 12;
+const MAX_AGENT_STEPS = 64;
 
 function App() {
   const [messages, setMessages] = useState<Message[]>([]);
@@ -139,7 +139,7 @@ function App() {
     root.style.setProperty("--accent", customAccent);
     root.style.setProperty("--accent2", customAccent2);
     root.style.setProperty("--accent-glow", `${customAccent}33`);
-  }, [themeKey, customAccent]);
+  }, [themeKey, customAccent, customAccent2]);
 
   useEffect(() => {
     document.documentElement.style.setProperty("--font-current", fontFamily);
@@ -316,13 +316,18 @@ function App() {
       let steps = 0;
       const accumulatedLogs: AgentStepLog[] = [];
       const accumulatedThoughts: string[] = [];
+      const executedSignatures = new Set<string>();
 
       while (steps < MAX_AGENT_STEPS) {
         steps++;
 
         const apiMessages = [systemPrompt, ...conversation].map(
           ({ role, content }, index, arr) => {
-            if (index === arr.length - 1 && role === "user") {
+            if (
+              index === arr.length - 1 &&
+              role === "user" &&
+              !content.startsWith("TOOL_RESULT:")
+            ) {
               if (workspacePath) {
                 return {
                   role,
@@ -407,6 +412,14 @@ function App() {
           const stepResults: string[] = [];
 
           for (const payload of toolPayloads) {
+            if (executedSignatures.has(payload)) {
+              stepResults.push(
+                "SYSTEM NOTICE: You ALREADY executed this exact tool call and got the result above. Do NOT call any more tools. Respond to the user in plain text right now."
+              );
+              continue;
+            }
+
+            executedSignatures.add(payload);
             const { resultText, log } = await executeAgentTool(payload);
             accumulatedLogs.push(log);
             stepResults.push(resultText);

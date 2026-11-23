@@ -1,12 +1,12 @@
 :root {
-  --bg-main: #0a0e0a;
-  --bg-panel: #111811;
-  --border-color: #1f3a1f;
-  --text-main: #d4f7d4;
-  --text-muted: #5c8a5c;
-  --accent: #00ff41;
-  --accent2: #1b691b;
-  --accent-glow: rgba(0, 255, 65, 0.2);
+  --bg-main: #ffffff;
+  --bg-panel: #f7f7f7;
+  --border-color: #c9c9c9;
+  --text-main: #5a5a5a;
+  --text-muted: #222222;
+  --accent: #4688bd;
+  --accent2: #0c4a7c;
+  --accent-glow: rgba(0, 238, 255, 0.2);
   --font-current: 'Consolas', 'Courier New', monospace;
 }
 
