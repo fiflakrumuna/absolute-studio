@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { invoke, Channel } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import type { AgentStepLog, Message, ProviderConfig, ThemeConfig } from "./types/chat";
 import { TopBar } from "./components/TopBar";
@@ -69,7 +69,7 @@ function buildSystemPrompt(workspacePath: string): Message {
   return {
     role: "system",
     content: `You are an autonomous coding agent operating inside Absolute Studio on Windows.
-A workspace directory IS CURRENTLY MOUNTED (${workspacePath}). You have full read, write, and terminal execution tools.
+A workspace directory IS CURRENTLY MOUNTED (${workspacePath}). You have full read, search, write, patch, and terminal execution tools.
 Never claim you lack access to files or the system.
 
 To use a tool, output ONLY ONE tool block per turn and wait for TOOL_RESULT:
@@ -79,12 +79,17 @@ To use a tool, output ONLY ONE tool block per turn and wait for TOOL_RESULT:
 {"tool": "list_files"}
 \`\`\`
 
-2. Read any file:
+2. Search for text/symbols across workspace files:
+\`\`\`tool
+{"tool": "search_files", "query": "search_term", "case_sensitive": false}
+\`\`\`
+
+3. Read any file:
 \`\`\`tool
 {"tool": "read_file", "path": "README.md"}
 \`\`\`
 
-3. Write/create a file directly on disk (ALWAYS use this exact code-fence format, NEVER JSON):
+4. Create or completely overwrite a file directly on disk (ALWAYS use this exact code-fence format, NEVER JSON):
 \`\`\`write_file: main.cpp
 #include <iostream>
 
@@ -94,17 +99,27 @@ int main() {
 }
 \`\`\`
 
-4. Run a terminal command (compile, test, run script):
+5. Patch/edit an existing file by replacing an exact unique snippet (ALWAYS use this exact code-fence format, NEVER JSON):
+\`\`\`edit_file: main.cpp
+<<<SEARCH
+    std::cout << "Hello\\n";
+===
+    std::cout << "Hello, Absolute Studio!\\n";
+>>>REPLACE
+\`\`\`
+
+6. Run a terminal command (compile, test, run script):
 \`\`\`tool
 {"tool": "run_command", "command": "g++ main.cpp -o main.exe && main.exe"}
 \`\`\`
 
 STRICT RULES:
-- Because a workspace is mounted, ALWAYS write generated code directly to files on disk using \`\`\`write_file: filename\`\`\` blocks BEFORE running any command.
+- Because a workspace is mounted, ALWAYS write or patch code directly on disk using \`\`\`write_file: filename\`\`\` or \`\`\`edit_file: filename\`\`\` BEFORE running any command.
+- When modifying an existing file, prefer \`\`\`edit_file: filename\`\`\` with an exact unique \`<<<SEARCH\` block instead of rewriting the whole file.
 - Keep code concise, clean, and under 80 lines (prefer console/ASCII output unless GUI/file export is explicitly requested) so responses never truncate.
 - Output ONLY ONE tool block per response, wait for TOOL_RESULT, and only then run \`run_command\`.
 - On Windows cmd.exe, run executables directly (e.g., \`main.exe\`, NEVER \`./main.exe\`).
-- Only after all files are written and verified, respond in plain text summarizing what you created and the execution output.`,
+- Only after all files are written/edited and verified, respond in plain text summarizing what you created/modified and the execution output.`,
   };
 }
 
@@ -120,13 +135,24 @@ function App() {
   const [workspaceStatus, setWorkspaceStatus] = useState<string | null>(null);
 
   const [isLocal, setIsLocal] = useState(true);
-  const [apiKey, setApiKey] = useState("");
+  const [apiKey, setApiKey] = useState(() => localStorage.getItem("abs_api_key") || "");
+  const [customBaseUrl, setCustomBaseUrl] = useState(
+    () => localStorage.getItem("abs_base_url") || "https://openrouter.ai/api/v1/chat/completions"
+  );
   const [model, setModel] = useState("qwen3.5:9b");
 
   const [themeKey, setThemeKey] = useState("clean");
   const [customAccent, setCustomAccent] = useState("#4688bd");
   const [customAccent2, setCustomAccent2] = useState("#0c4a7c");
   const [fontFamily, setFontFamily] = useState("'Consolas', 'Courier New', monospace");
+
+  useEffect(() => {
+    localStorage.setItem("abs_api_key", apiKey);
+  }, [apiKey]);
+
+  useEffect(() => {
+    localStorage.setItem("abs_base_url", customBaseUrl);
+  }, [customBaseUrl]);
 
   useEffect(() => {
     const theme = THEMES[themeKey];
@@ -200,6 +226,24 @@ function App() {
           };
         }
 
+        case "search_files": {
+          setWorkspaceStatus(`[AGENT: SEARCHING '${parsed.query}'...]`);
+          const out = await invoke<string>("search_workspace_files", {
+            workspace: workspacePath,
+            query: parsed.query,
+            caseSensitive: parsed.case_sensitive ?? false,
+          });
+          return {
+            resultText: out,
+            log: {
+              tool: "search_files",
+              target: parsed.query,
+              output: out,
+              isError: false,
+            },
+          };
+        }
+
         case "read_file": {
           setWorkspaceStatus(`[AGENT: READING ${parsed.path}...]`);
           const out = await invoke<string>("read_workspace_file", {
@@ -228,6 +272,44 @@ function App() {
             resultText: out,
             log: {
               tool: "write_file",
+              target: parsed.path,
+              output: out,
+              isError: false,
+            },
+          };
+        }
+
+        case "edit_file": {
+          const oldText =
+            parsed.old_text ?? parsed.oldText ?? parsed.search ?? parsed.old;
+          const newText =
+            parsed.new_text ?? parsed.newText ?? parsed.replace ?? parsed.new;
+
+          if (typeof oldText !== "string" || typeof newText !== "string") {
+            const err =
+              "ERROR: Missing search/replace text. Use the ```edit_file: filename``` block with <<<SEARCH ... === ... >>>REPLACE.";
+            return {
+              resultText: err,
+              log: {
+                tool: "edit_file",
+                target: parsed.path || "unknown",
+                output: err,
+                isError: true,
+              },
+            };
+          }
+
+          setWorkspaceStatus(`[AGENT: PATCHING ${parsed.path}...]`);
+          const out = await invoke<string>("edit_workspace_file", {
+            workspace: workspacePath,
+            relativePath: parsed.path,
+            oldText,
+            newText,
+          });
+          return {
+            resultText: out,
+            log: {
+              tool: "edit_file",
               target: parsed.path,
               output: out,
               isError: false,
@@ -300,16 +382,16 @@ function App() {
 
     const config: ProviderConfig = isLocal
       ? {
-          base_url: "http://localhost:11434/v1/chat/completions",
+          base_url: "http://localhost:11434/api/chat",
           api_key: null,
           model,
           think: false,
         }
       : {
-          base_url: "https://openrouter.ai/api/v1/chat/completions",
+          base_url: customBaseUrl.trim() || "https://openrouter.ai/api/v1/chat/completions",
           api_key: apiKey,
           model,
-          think: null,
+          think: false,
         };
 
     try {
@@ -331,12 +413,12 @@ function App() {
               if (workspacePath) {
                 return {
                   role,
-                  content: `[SYSTEM CONTEXT: Workspace "${workspacePath}" is mounted. First write the file with \`\`\`write_file: path\`\`\`, wait for TOOL_RESULT, then run it.]\n\n${content}`,
+                  content: `[SYSTEM CONTEXT: Workspace "${workspacePath}" is mounted. Use \`\`\`write_file: path\`\`\` or \`\`\`edit_file: path\`\`\` before running commands.]\n\n${content}`,
                 };
               } else {
                 return {
                   role,
-                  content: `[SYSTEM CONTEXT: No workspace is currently mounted. Do NOT output write_file or tool blocks; provide normal code blocks in chat.]\n\n${content}`,
+                  content: `[SYSTEM CONTEXT: No workspace is currently mounted. Do NOT output write_file, edit_file, or tool blocks; provide normal code blocks in chat.]\n\n${content}`,
                 };
               }
             }
@@ -344,9 +426,39 @@ function App() {
           }
         );
 
+        let streamedSoFar = "";
+        const onChunk = new Channel<string>();
+
+        onChunk.onmessage = (chunk) => {
+          streamedSoFar += chunk;
+
+          let displayStream = streamedSoFar
+            .replace(/<think>[\s\S]*?<\/think>/g, "")
+            .replace(/<think>[\s\S]*$/g, "");
+
+          // Ukryj na żywo bloki narzędzi (write_file / edit_file / tool), żeby nie zaśmiecały czatu przed wykonaniem
+          const toolFenceIndex = displayStream.search(/```(?:write_file:|edit_file:|tool\b)/);
+          if (toolFenceIndex !== -1) {
+            displayStream = displayStream.slice(0, toolFenceIndex);
+          }
+
+          displayStream = displayStream.trim();
+
+          setMessages([
+            ...conversation,
+            {
+              role: "assistant",
+              content: displayStream || "Agent working...",
+              agentLogs: accumulatedLogs.length > 0 ? [...accumulatedLogs] : undefined,
+              thoughtProcess: accumulatedThoughts.join("\n\n---\n\n") || undefined,
+            },
+          ]);
+        };
+
         const rawResponse = await invoke<string>("send_message", {
           messages: apiMessages,
           config,
+          onChunk,
         });
 
         let cleanResponse = rawResponse;
@@ -376,6 +488,33 @@ function App() {
             continue;
           }
 
+          if (header.startsWith("edit_file:")) {
+            const path = header.replace("edit_file:", "").trim();
+            const patchMatch = body.match(
+              /<<<SEARCH\r?\n([\s\S]*?)\r?\n===\r?\n([\s\S]*?)\r?\n>>>REPLACE/
+            );
+            if (patchMatch) {
+              toolPayloads.push(
+                JSON.stringify({
+                  tool: "edit_file",
+                  path,
+                  old_text: patchMatch[1],
+                  new_text: patchMatch[2],
+                })
+              );
+            } else {
+              toolPayloads.push(
+                JSON.stringify({
+                  tool: "edit_file",
+                  path,
+                  old_text: null,
+                  new_text: null,
+                })
+              );
+            }
+            continue;
+          }
+
           if (header === "tool") {
             const jsonLines = body
               .split(/\r?\n/)
@@ -397,12 +536,31 @@ function App() {
             const path = firstLine.replace("write_file:", "").trim();
             const content = lines.slice(1).join("\n");
             toolPayloads.push(JSON.stringify({ tool: "write_file", path, content }));
+          } else if (firstLine.startsWith("edit_file:")) {
+            const path = firstLine.replace("edit_file:", "").trim();
+            const rest = lines.slice(1).join("\n");
+            const patchMatch = rest.match(
+              /<<<SEARCH\r?\n([\s\S]*?)\r?\n===\r?\n([\s\S]*?)\r?\n>>>REPLACE/
+            );
+            if (patchMatch) {
+              toolPayloads.push(
+                JSON.stringify({
+                  tool: "edit_file",
+                  path,
+                  old_text: patchMatch[1],
+                  new_text: patchMatch[2],
+                })
+              );
+            }
           } else if (firstLine.startsWith("run_command:")) {
             const command = firstLine.replace("run_command:", "").trim();
             toolPayloads.push(JSON.stringify({ tool: "run_command", command }));
           } else if (firstLine.startsWith("read_file:")) {
             const path = firstLine.replace("read_file:", "").trim();
             toolPayloads.push(JSON.stringify({ tool: "read_file", path }));
+          } else if (firstLine.startsWith("search_files:")) {
+            const query = firstLine.replace("search_files:", "").trim();
+            toolPayloads.push(JSON.stringify({ tool: "search_files", query }));
           } else if (firstLine === "list_files") {
             toolPayloads.push(JSON.stringify({ tool: "list_files" }));
           }
@@ -439,7 +597,7 @@ function App() {
             ...conversation,
             {
               role: "assistant",
-              content: "",
+              content: "Agent working...",
               agentLogs: [...accumulatedLogs],
               thoughtProcess: accumulatedThoughts.join("\n\n---\n\n") || undefined,
             },
@@ -485,6 +643,8 @@ function App() {
           onModeChange={handleModeChange}
           apiKey={apiKey}
           setApiKey={setApiKey}
+          customBaseUrl={customBaseUrl}
+          setCustomBaseUrl={setCustomBaseUrl}
           model={model}
           setModel={setModel}
           themeKey={themeKey}

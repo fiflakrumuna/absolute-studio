@@ -7,6 +7,8 @@ interface SettingsSidebarProps {
   onModeChange: (local: boolean) => void;
   apiKey: string;
   setApiKey: (key: string) => void;
+  customBaseUrl: string;
+  setCustomBaseUrl: (url: string) => void;
   model: string;
   setModel: (model: string) => void;
   themeKey: string;
@@ -25,6 +27,8 @@ export const SettingsSidebar: React.FC<SettingsSidebarProps> = ({
   onModeChange,
   apiKey,
   setApiKey,
+  customBaseUrl,
+  setCustomBaseUrl,
   model,
   setModel,
   themeKey,
@@ -53,7 +57,7 @@ export const SettingsSidebar: React.FC<SettingsSidebarProps> = ({
             onChange={(e) => onModeChange(e.target.value === "local")}
           >
             <option value="local">Local (Ollama)</option>
-            <option value="cloud">Cloud (OpenRouter)</option>
+            <option value="cloud">Cloud / Remote API</option>
           </select>
 
           <label className="sidebar-label" style={{ marginTop: "10px" }}>
@@ -70,6 +74,17 @@ export const SettingsSidebar: React.FC<SettingsSidebarProps> = ({
           {!isLocal && (
             <>
               <label className="sidebar-label" style={{ marginTop: "10px" }}>
+                API ENDPOINT URL
+              </label>
+              <input
+                type="text"
+                className="sidebar-control"
+                value={customBaseUrl}
+                onChange={(e) => setCustomBaseUrl(e.target.value)}
+                placeholder="https://ollama.twojadomena.pl/v1/chat/completions"
+              />
+
+              <label className="sidebar-label" style={{ marginTop: "10px" }}>
                 API KEY
               </label>
               <input
@@ -77,7 +92,7 @@ export const SettingsSidebar: React.FC<SettingsSidebarProps> = ({
                 className="sidebar-control"
                 value={apiKey}
                 onChange={(e) => setApiKey(e.target.value)}
-                placeholder="sk-or-v1-..."
+                placeholder="sk-or-v1-... / token"
               />
             </>
           )}
@@ -96,8 +111,6 @@ export const SettingsSidebar: React.FC<SettingsSidebarProps> = ({
             <option value="minimal">Minimal Dark</option>
             <option value="clean">Clean Light</option>
           </select>
-
-          
 
           <label className="sidebar-label" style={{ marginTop: "10px" }}>
             TYPOGRAPHY

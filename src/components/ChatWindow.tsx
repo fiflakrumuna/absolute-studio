@@ -32,9 +32,6 @@ export function ChatWindow({ messages, isLoading, isLocal, model }: ChatWindowPr
 
       {isLoading && (
         <div className="message-card assistant">
-          <div className="message-header">
-            {`${isLocal ? "LOCAL" : "CLOUD"}@${model.toUpperCase()}:~#`}
-          </div>
           <div className="message-body">Agent working...</div>
         </div>
       )}

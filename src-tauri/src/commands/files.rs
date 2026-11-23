@@ -95,6 +95,137 @@ pub async fn write_workspace_file(
 }
 
 #[tauri::command]
+pub async fn edit_workspace_file(
+    workspace: String,
+    relative_path: String,
+    old_text: String,
+    new_text: String,
+) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let target = resolve_workspace_path(&workspace, &relative_path)?;
+        let content = fs::read_to_string(&target)
+            .map_err(|e| format!("Failed to read '{}': {}", relative_path, e))?;
+
+        let matches = content.matches(&old_text).count();
+        if matches == 0 {
+            return Err(format!(
+                "Could not find exact 'old_text' match in '{}'. Make sure whitespace and indentation match.",
+                relative_path
+            ));
+        }
+        if matches > 1 {
+            return Err(format!(
+                "Found {} occurrences of 'old_text' in '{}'. Include more surrounding lines to make the match unique.",
+                matches, relative_path
+            ));
+        }
+
+        let updated = content.replacen(&old_text, &new_text, 1);
+        fs::write(&target, updated)
+            .map_err(|e| format!("Failed to write updated '{}': {}", relative_path, e))?;
+
+        Ok(format!("Successfully patched: {}", relative_path))
+    })
+    .await
+    .map_err(|e| format!("Task join error: {}", e))?
+}
+
+#[tauri::command]
+pub async fn search_workspace_files(
+    workspace: String,
+    query: String,
+    case_sensitive: Option<bool>,
+) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let base = Path::new(&workspace);
+        if !base.exists() || !base.is_dir() {
+            return Err("Workspace directory not found.".to_string());
+        }
+        if query.trim().is_empty() {
+            return Err("Search query cannot be empty.".to_string());
+        }
+
+        let sensitive = case_sensitive.unwrap_or(false);
+        let needle = if sensitive {
+            query.clone()
+        } else {
+            query.to_lowercase()
+        };
+
+        let mut results = Vec::new();
+        let max_results = 100;
+
+        fn search_dir(
+            dir: &Path,
+            base: &Path,
+            needle: &str,
+            sensitive: bool,
+            results: &mut Vec<String>,
+            max_results: usize,
+        ) -> std::io::Result<()> {
+            if results.len() >= max_results {
+                return Ok(());
+            }
+
+            for entry in fs::read_dir(dir)? {
+                if results.len() >= max_results {
+                    break;
+                }
+
+                let entry = entry?;
+                let path = entry.path();
+                let name = entry.file_name().to_string_lossy().to_string();
+
+                if name == "node_modules" || name == "target" || name == ".git" {
+                    continue;
+                }
+
+                if path.is_dir() {
+                    search_dir(&path, base, needle, sensitive, results, max_results)?;
+                } else if let Ok(content) = fs::read_to_string(&path) {
+                    let rel = path
+                        .strip_prefix(base)
+                        .unwrap_or(&path)
+                        .to_string_lossy()
+                        .replace('\\', "/");
+
+                    for (idx, line) in content.lines().enumerate() {
+                        let matched = if sensitive {
+                            line.contains(needle)
+                        } else {
+                            line.to_lowercase().contains(needle)
+                        };
+
+                        if matched {
+                            results.push(format!("{}:{}: {}", rel, idx + 1, line.trim()));
+                            if results.len() >= max_results {
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            Ok(())
+        }
+
+        search_dir(base, base, &needle, sensitive, &mut results, max_results)
+            .map_err(|e| e.to_string())?;
+
+        if results.is_empty() {
+            Ok(format!("No matches found for '{}'.", query))
+        } else {
+            let mut output = results.join("\n");
+            if results.len() >= max_results {
+                output.push_str("\n... [RESULTS TRUNCATED AT 100 MATCHES]");
+            }
+            Ok(output)
+        }
+    })
+    .await
+    .map_err(|e| format!("Task join error: {}", e))?
+}
+
+#[tauri::command]
 pub async fn run_workspace_command(workspace: String, command: String) -> Result<String, String> {
     let future = tauri::async_runtime::spawn_blocking(move || {
         let base = Path::new(&workspace);
