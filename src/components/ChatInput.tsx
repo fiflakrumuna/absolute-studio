@@ -4,6 +4,7 @@ interface ChatInputProps {
   prompt: string;
   setPrompt: (value: string) => void;
   onSend: () => void;
+  onStop: () => void;
   isLoading: boolean;
   workspacePath: string;
   onSelectWorkspace: () => void;
@@ -15,6 +16,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
   prompt,
   setPrompt,
   onSend,
+  onStop,
   isLoading,
   workspacePath,
   onSelectWorkspace,
@@ -22,9 +24,16 @@ export const ChatInput: React.FC<ChatInputProps> = ({
   workspaceStatus,
 }) => {
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.key === "Escape" && isLoading) {
+      e.preventDefault();
+      onStop();
+      return;
+    }
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
-      onSend();
+      if (!isLoading) {
+        onSend();
+      }
     }
   };
 
@@ -62,9 +71,12 @@ export const ChatInput: React.FC<ChatInputProps> = ({
           value={prompt}
           onChange={(e) => setPrompt(e.target.value)}
           onKeyDown={handleKeyDown}
-          placeholder="Enter command (Enter = execute, Shift+Enter = new line)..."
+          placeholder={
+            isLoading
+              ? "Agent is working... (Click STOP or press Esc to abort)"
+              : "Enter command (Enter = execute, Shift+Enter = new line)..."
+          }
           rows={2}
-          disabled={isLoading}
         />
 
         {/* Dolny pasek akcji wewnątrz boksu (jak w Gemini) */}
@@ -89,14 +101,29 @@ export const ChatInput: React.FC<ChatInputProps> = ({
             )}
           </div>
 
-          <button
-            type="button"
-            className="exec-btn"
-            onClick={onSend}
-            disabled={isLoading || !prompt.trim()}
-          >
-            {isLoading ? "BUSY..." : "EXEC ↵"}
-          </button>
+          {isLoading ? (
+            <button
+              type="button"
+              className="exec-btn stop-btn"
+              onClick={onStop}
+              style={{
+                borderColor: "#ef4444",
+                color: "#ef4444",
+              }}
+              title="Zatrzymaj generowanie (Esc)"
+            >
+              ■ STOP
+            </button>
+          ) : (
+            <button
+              type="button"
+              className="exec-btn"
+              onClick={onSend}
+              disabled={!prompt.trim()}
+            >
+              EXEC ↵
+            </button>
+          )}
         </div>
       </div>
     </div>

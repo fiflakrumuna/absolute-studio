@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { invoke, Channel } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import type { AgentStepLog, Message, ProviderConfig, ThemeConfig } from "./types/chat";
@@ -157,12 +157,27 @@ function App() {
   const [customBaseUrl, setCustomBaseUrl] = useState(
     () => localStorage.getItem("abs_base_url") || "https://openrouter.ai/api/v1/chat/completions"
   );
+  const [remoteModel, setRemoteModel] = useState(
+    () => localStorage.getItem("abs_remote_model") || "qwen3.5:9b"
+  );
+
   const [model, setModel] = useState("qwen3.5:9b");
 
-  const [themeKey, setThemeKey] = useState("clean");
-  const [customAccent, setCustomAccent] = useState("#4688bd");
-  const [customAccent2, setCustomAccent2] = useState("#0c4a7c");
-  const [fontFamily, setFontFamily] = useState("'Consolas', 'Courier New', monospace");
+  const [themeKey, setThemeKey] = useState(() => {
+    const saved = localStorage.getItem("abs_theme_key");
+    return saved && THEMES[saved] ? saved : "clean";
+  });
+  const [customAccent, setCustomAccent] = useState(
+    () => localStorage.getItem("abs_accent") || THEMES.clean.accent
+  );
+  const [customAccent2, setCustomAccent2] = useState(
+    () => localStorage.getItem("abs_accent2") || THEMES.clean.accent2
+  );
+  const [fontFamily, setFontFamily] = useState(
+    () => localStorage.getItem("abs_font_family") || "'Consolas', 'Courier New', monospace"
+  );
+
+  const abortRef = useRef(false);
 
   useEffect(() => {
     localStorage.setItem("abs_api_key", apiKey);
@@ -173,7 +188,14 @@ function App() {
   }, [customBaseUrl]);
 
   useEffect(() => {
-    const theme = THEMES[themeKey];
+    if (!isLocal) {
+      setRemoteModel(model);
+      localStorage.setItem("abs_remote_model", model);
+    }
+  }, [model, isLocal]);
+
+  useEffect(() => {
+    const theme = THEMES[themeKey] || THEMES.clean;
     const root = document.documentElement;
     root.style.setProperty("--bg-main", theme.bgMain);
     root.style.setProperty("--bg-panel", theme.bgPanel);
@@ -183,10 +205,15 @@ function App() {
     root.style.setProperty("--accent", customAccent);
     root.style.setProperty("--accent2", customAccent2);
     root.style.setProperty("--accent-glow", `${customAccent}33`);
+
+    localStorage.setItem("abs_theme_key", themeKey);
+    localStorage.setItem("abs_accent", customAccent);
+    localStorage.setItem("abs_accent2", customAccent2);
   }, [themeKey, customAccent, customAccent2]);
 
   useEffect(() => {
     document.documentElement.style.setProperty("--font-current", fontFamily);
+    localStorage.setItem("abs_font_family", fontFamily);
   }, [fontFamily]);
 
   const showTempStatus = (msg: string) => {
@@ -210,6 +237,15 @@ function App() {
   const handleClearWorkspace = () => {
     setWorkspacePath("");
     showTempStatus("[WORKSPACE UNMOUNTED]");
+  };
+
+  const handleStop = async () => {
+    abortRef.current = true;
+    try {
+      await invoke("abort_generation");
+    } catch {
+      // Ignorujemy błędy wywołania komendy stop
+    }
   };
 
   const executeAgentTool = async (
@@ -423,16 +459,20 @@ function App() {
 
   const handleModeChange = (local: boolean) => {
     setIsLocal(local);
-    setModel(local ? "qwen3.5:9b" : "anthropic/claude-3.7-sonnet");
+    setModel(local ? "qwen3.5:9b" : remoteModel);
   };
 
   async function handleSend() {
     if (!prompt.trim() || isLoading) return;
 
+    abortRef.current = false;
     const userMessage: Message = { role: "user", content: prompt };
     let conversation = [...messages, userMessage];
 
-    setMessages(conversation);
+    setMessages([
+      ...conversation,
+      { role: "assistant", content: "Agent working..." },
+    ]);
     setPrompt("");
     setIsLoading(true);
 
@@ -459,6 +499,9 @@ function App() {
       const executedSignatures = new Set<string>();
 
       while (steps < MAX_AGENT_STEPS) {
+        if (abortRef.current) {
+          throw new Error("ABORTED");
+        }
         steps++;
 
         const apiMessages = [systemPrompt, ...conversation].map(
@@ -488,6 +531,7 @@ function App() {
         const onChunk = new Channel<string>();
 
         onChunk.onmessage = (chunk) => {
+          if (abortRef.current) return;
           streamedSoFar += chunk;
 
           let displayStream = streamedSoFar
@@ -633,6 +677,10 @@ function App() {
           const stepResults: string[] = [];
 
           for (const payload of toolPayloads) {
+            if (abortRef.current) {
+              throw new Error("ABORTED");
+            }
+
             if (executedSignatures.has(payload)) {
               stepResults.push(
                 "SYSTEM NOTICE: You ALREADY executed this exact tool call and got the result above. Do NOT call any more tools. Respond to the user in plain text right now."
@@ -679,10 +727,28 @@ function App() {
         }
       }
     } catch (error) {
-      setMessages((prev) => [
-        ...prev,
-        { role: "assistant", content: `[SYSTEM ERROR]: ${String(error)}` },
-      ]);
+      const errStr = String(error);
+      if (abortRef.current || errStr.includes("ABORTED")) {
+        setMessages((prev) => {
+          const updated = [...prev];
+          const last = updated[updated.length - 1];
+          if (last && last.role === "assistant") {
+            const currentText = last.content === "Agent working..." ? "" : last.content;
+            updated[updated.length - 1] = {
+              ...last,
+              content: currentText
+                ? `${currentText}\n\n*[Generation stopped by user]*`
+                : "*[Generation stopped by user]*",
+            };
+          }
+          return updated;
+        });
+      } else {
+        setMessages((prev) => [
+          ...prev,
+          { role: "assistant", content: `[SYSTEM ERROR]: ${errStr}` },
+        ]);
+      }
     } finally {
       setIsLoading(false);
       setWorkspaceStatus(null);
@@ -731,6 +797,7 @@ function App() {
             prompt={prompt}
             setPrompt={setPrompt}
             onSend={handleSend}
+            onStop={handleStop}
             isLoading={isLoading}
             workspacePath={workspacePath}
             onSelectWorkspace={handleSelectWorkspace}

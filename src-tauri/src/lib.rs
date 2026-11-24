@@ -15,6 +15,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
             commands::llm::send_message,
+            commands::llm::abort_generation,
             commands::files::list_workspace_files,
             commands::files::read_workspace_file,
             commands::files::write_workspace_file,

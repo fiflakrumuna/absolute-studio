@@ -1,6 +1,14 @@
 use crate::models::chat::{Message, ProviderConfig};
 use serde_json::{json, Value};
+use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::ipc::Channel;
+
+static ABORT_REQUESTED: AtomicBool = AtomicBool::new(false);
+
+#[tauri::command]
+pub fn abort_generation() {
+    ABORT_REQUESTED.store(true, Ordering::SeqCst);
+}
 
 #[tauri::command]
 pub async fn send_message(
@@ -8,6 +16,8 @@ pub async fn send_message(
     config: ProviderConfig,
     on_chunk: Channel<String>,
 ) -> Result<String, String> {
+    ABORT_REQUESTED.store(false, Ordering::SeqCst);
+
     let api_url = if config.base_url.trim().is_empty() {
         "http://localhost:11434/api/chat".to_string()
     } else {
@@ -16,7 +26,7 @@ pub async fn send_message(
 
     let is_openai_compat = api_url.contains("/v1/chat/completions");
 
-    let mut request_body = if is_openai_compat {
+    let request_body = if is_openai_compat {
         json!({
             "model": config.model,
             "messages": messages,
@@ -38,8 +48,6 @@ pub async fn send_message(
         })
     };
 
-
-
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(300))
         .build()
@@ -58,6 +66,10 @@ pub async fn send_message(
         .await
         .map_err(|e| format!("Failed to connect to API LLM: {}", e))?;
 
+    if ABORT_REQUESTED.load(Ordering::SeqCst) {
+        return Err("ABORTED".to_string());
+    }
+
     let status = response.status();
     if !status.is_success() {
         let raw_text = response
@@ -75,6 +87,10 @@ pub async fn send_message(
         .await
         .map_err(|e| format!("Stream read error: {}", e))?
     {
+        if ABORT_REQUESTED.load(Ordering::SeqCst) {
+            return Err("ABORTED".to_string());
+        }
+
         let text = String::from_utf8_lossy(&chunk);
         line_buffer.push_str(&text);
 

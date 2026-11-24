@@ -1,5 +1,6 @@
 import { Message } from "../types/chat";
 import { MessageBubble } from "./MessageBubble";
+import { useEffect, useRef } from "react";
 
 interface ChatWindowProps {
   messages: Message[];
@@ -8,13 +9,31 @@ interface ChatWindowProps {
   model: string;
 }
 
-export function ChatWindow({ messages, isLoading, isLocal, model }: ChatWindowProps) {
+export function ChatWindow({ messages, isLocal, model }: ChatWindowProps) {
+  const containerRef = useRef<HTMLElement>(null);
+  const messagesEndRef = useRef<HTMLDivElement>(null);
+  const prevCountRef = useRef(0);
+
   const visibleMessages = messages.filter(
     (msg) => msg.role !== "system" && !msg.hiddenFromUi
   );
 
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+
+    const isNewMessage = visibleMessages.length > prevCountRef.current;
+    prevCountRef.current = visibleMessages.length;
+
+    const isNearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 55;
+
+    if (isNewMessage || isNearBottom) {
+      messagesEndRef.current?.scrollIntoView({ behavior: "auto" });
+    }
+  }, [messages]);
+
   return (
-    <main className="chat-window">
+    <main className="chat-window" ref={containerRef}>
       {visibleMessages.length === 0 && (
         <div className="empty-state">
           <p>
@@ -30,11 +49,7 @@ export function ChatWindow({ messages, isLoading, isLocal, model }: ChatWindowPr
         <MessageBubble key={idx} message={msg} isLocal={isLocal} model={model} />
       ))}
 
-      {isLoading && (
-        <div className="message-card assistant">
-          <div className="message-body">Agent working...</div>
-        </div>
-      )}
+      <div ref={messagesEndRef} />
     </main>
   );
 }

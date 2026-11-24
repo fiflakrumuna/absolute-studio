@@ -1,8 +1,11 @@
-Przyczyny "Brak odpowiedzi/Not responding" w release (po kompilacji), które nie występują w dev:
+# Implementacja systemu zapisu konfiguracji modelu AI w Tauri 2.0
 
-1. **Optymalizacja kodu (Release vs Debug)**
-   - W trybie Release kompilator optymalizuje kod, co może prowadzić do:
-     - Usuwania zmiennych "niepotrzebnych" (np. `volatile` jest kluczowe dla flagi zakończenia pętli)
-     - Reordering instrukcji (może zmienić kolejność dostępu do pamięci)
-   - **Rozwiązanie:** Użyj `volatile` dla zmiennych kontrolujących pętle, np.:
-     
+## Cel
+Zapamiętywanie ostatnio używanego modelu AI (lokalnego lub chmurowego), wraz z linkiem API i kluczem, aby po ponownym uruchomieniu programu ustawienia były automatycznie przywracane.
+
+## Rozwiązanie
+
+### 1. Zmiana w `src/App.tsx`
+
+Dodaj nowy stan do pamięci podręcznej przeglądarki (localStorage) dla ostatnio używanego modelu:
+
