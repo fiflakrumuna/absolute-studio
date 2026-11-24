@@ -57,20 +57,35 @@ const THEMES: Record<string, ThemeConfig> = {
 };
 
 function buildSystemPrompt(workspacePath: string): Message {
+  const webToolsDoc = `
+- Search the web for current information or documentation:
+\`\`\`tool
+{"tool": "web_search", "query": "your search query"}
+\`\`\`
+
+- Fetch and read clean text from any webpage URL:
+\`\`\`tool
+{"tool": "fetch_url", "url": "https://example.com"}
+\`\`\``;
+
   if (!workspacePath) {
     return {
       role: "system",
-      content:
-        "You are an expert software architect and coding assistant inside Absolute Studio. " +
-        "No local workspace directory is currently mounted, so provide clean code blocks in chat and remind the user they can click WORKSPACE: NONE at the bottom if they want you to write and test files directly on disk.",
+      content: `You are an expert software architect and research assistant inside Absolute Studio.
+No local workspace directory is currently mounted (do NOT use file or command tools; if the user wants files saved on disk, remind them to click WORKSPACE: NONE at the bottom).
+
+You DO have live internet tools. To use a tool, output ONLY ONE tool block per turn and wait for TOOL_RESULT:
+${webToolsDoc}
+
+After receiving TOOL_RESULT, answer the user directly in plain text.`,
     };
   }
 
   return {
     role: "system",
-    content: `You are an autonomous coding agent operating inside Absolute Studio on Windows.
-A workspace directory IS CURRENTLY MOUNTED (${workspacePath}). You have full read, search, write, patch, and terminal execution tools.
-Never claim you lack access to files or the system.
+    content: `You are an autonomous coding and research agent operating inside Absolute Studio on Windows.
+A workspace directory IS CURRENTLY MOUNTED (${workspacePath}). You have full read, search, write, patch, terminal execution, and live internet tools.
+Never claim you lack access to files, the system, or the internet.
 
 To use a tool, output ONLY ONE tool block per turn and wait for TOOL_RESULT:
 
@@ -112,6 +127,9 @@ int main() {
 \`\`\`tool
 {"tool": "run_command", "command": "g++ main.cpp -o main.exe && main.exe"}
 \`\`\`
+
+7. Web tools (internet search & webpage scraper):
+${webToolsDoc}
 
 STRICT RULES:
 - Because a workspace is mounted, ALWAYS write or patch code directly on disk using \`\`\`write_file: filename\`\`\` or \`\`\`edit_file: filename\`\`\` BEFORE running any command.
@@ -197,19 +215,59 @@ function App() {
   const executeAgentTool = async (
     rawToolJson: string
   ): Promise<{ resultText: string; log: AgentStepLog }> => {
-    if (!workspacePath) {
-      const err =
-        "ERROR: No workspace directory is mounted. Ask the user to click WORKSPACE: NONE at the bottom first.";
-      return {
-        resultText: err,
-        log: { tool: "error", target: "workspace", output: err, isError: true },
-      };
-    }
-
     try {
       const parsed = JSON.parse(rawToolJson);
+      const workspaceTools = new Set([
+        "list_files",
+        "search_files",
+        "read_file",
+        "write_file",
+        "edit_file",
+        "run_command",
+      ]);
+
+      if (workspaceTools.has(parsed.tool) && !workspacePath) {
+        const err =
+          "ERROR: No workspace directory is mounted. Ask the user to click WORKSPACE: NONE at the bottom first.";
+        return {
+          resultText: err,
+          log: { tool: "error", target: "workspace", output: err, isError: true },
+        };
+      }
 
       switch (parsed.tool) {
+        case "web_search": {
+          setWorkspaceStatus(`[AGENT: WEB SEARCH '${parsed.query}'...]`);
+          const out = await invoke<string>("web_search", {
+            query: parsed.query,
+          });
+          return {
+            resultText: out,
+            log: {
+              tool: "web_search",
+              target: parsed.query,
+              output: out,
+              isError: false,
+            },
+          };
+        }
+
+        case "fetch_url": {
+          setWorkspaceStatus(`[AGENT: FETCHING ${parsed.url}...]`);
+          const out = await invoke<string>("fetch_url", {
+            url: parsed.url,
+          });
+          return {
+            resultText: out,
+            log: {
+              tool: "fetch_url",
+              target: parsed.url,
+              output: out,
+              isError: false,
+            },
+          };
+        }
+
         case "list_files": {
           setWorkspaceStatus("[AGENT: LISTING FILES...]");
           const out = await invoke<string>("list_workspace_files", {
@@ -413,12 +471,12 @@ function App() {
               if (workspacePath) {
                 return {
                   role,
-                  content: `[SYSTEM CONTEXT: Workspace "${workspacePath}" is mounted. Use \`\`\`write_file: path\`\`\` or \`\`\`edit_file: path\`\`\` before running commands.]\n\n${content}`,
+                  content: `[SYSTEM CONTEXT: Workspace "${workspacePath}" is mounted. Use \`\`\`write_file: path\`\`\` or \`\`\`edit_file: path\`\`\` before running commands. You also have web_search and fetch_url.]\n\n${content}`,
                 };
               } else {
                 return {
                   role,
-                  content: `[SYSTEM CONTEXT: No workspace is currently mounted. Do NOT output write_file, edit_file, or tool blocks; provide normal code blocks in chat.]\n\n${content}`,
+                  content: `[SYSTEM CONTEXT: No workspace is currently mounted. Do NOT output file or command blocks, but you MAY use web_search or fetch_url if needed.]\n\n${content}`,
                 };
               }
             }
@@ -436,7 +494,6 @@ function App() {
             .replace(/<think>[\s\S]*?<\/think>/g, "")
             .replace(/<think>[\s\S]*$/g, "");
 
-          // Ukryj na żywo bloki narzędzi (write_file / edit_file / tool), żeby nie zaśmiecały czatu przed wykonaniem
           const toolFenceIndex = displayStream.search(/```(?:write_file:|edit_file:|tool\b)/);
           if (toolFenceIndex !== -1) {
             displayStream = displayStream.slice(0, toolFenceIndex);
@@ -561,6 +618,12 @@ function App() {
           } else if (firstLine.startsWith("search_files:")) {
             const query = firstLine.replace("search_files:", "").trim();
             toolPayloads.push(JSON.stringify({ tool: "search_files", query }));
+          } else if (firstLine.startsWith("web_search:")) {
+            const query = firstLine.replace("web_search:", "").trim();
+            toolPayloads.push(JSON.stringify({ tool: "web_search", query }));
+          } else if (firstLine.startsWith("fetch_url:")) {
+            const url = firstLine.replace("fetch_url:", "").trim();
+            toolPayloads.push(JSON.stringify({ tool: "fetch_url", url }));
           } else if (firstLine === "list_files") {
             toolPayloads.push(JSON.stringify({ tool: "list_files" }));
           }

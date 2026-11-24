@@ -38,11 +38,7 @@ pub async fn send_message(
         })
     };
 
-    if is_openai_compat {
-        if let Some(think_val) = config.think {
-            request_body["think"] = json!(think_val);
-        }
-    }
+
 
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(300))

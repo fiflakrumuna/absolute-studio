@@ -1,6 +1,7 @@
 mod commands;
 mod models;
 
+
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
 #[tauri::command]
 fn greet(name: &str) -> String {
@@ -20,6 +21,9 @@ pub fn run() {
             commands::files::run_workspace_command,
             commands::files::edit_workspace_file,
             commands::files::search_workspace_files,
+            commands::web::fetch_url,
+            commands::web::web_search,
+
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
