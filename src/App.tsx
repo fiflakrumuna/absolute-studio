@@ -74,10 +74,13 @@ function buildSystemPrompt(workspacePath: string): Message {
       content: `You are an expert software architect and research assistant inside Absolute Studio.
 No local workspace directory is currently mounted (do NOT use file or command tools; if the user wants files saved on disk, remind them to click WORKSPACE: NONE at the bottom).
 
-You DO have live internet tools. To use a tool, output ONLY ONE tool block per turn and wait for TOOL_RESULT:
+You DO have live internet tools. When the user asks for current/real-time info (news, prices, exchange rates, weather, documentation), you MUST call a tool using ONLY this exact \`\`\`tool\`\`\` code fence format (NEVER use \`\`\`json\`\`\` or invent fields like "status"):
 ${webToolsDoc}
 
-After receiving TOOL_RESULT, answer the user directly in plain text.`,
+STRICT RULES:
+- Output ONLY ONE \`\`\`tool\`\`\` block per turn and STOP immediately so the system can run it.
+- NEVER simulate or fake a search result with \`\`\`json\`\`\`.
+- Only after receiving \`TOOL_RESULT:\`, answer the user directly using Markdown.`,
     };
   }
 
@@ -137,7 +140,8 @@ STRICT RULES:
 - Keep code concise, clean, and under 80 lines (prefer console/ASCII output unless GUI/file export is explicitly requested) so responses never truncate.
 - Output ONLY ONE tool block per response, wait for TOOL_RESULT, and only then run \`run_command\`.
 - On Windows cmd.exe, run executables directly (e.g., \`main.exe\`, NEVER \`./main.exe\`).
-- Only after all files are written/edited and verified, respond in plain text summarizing what you created/modified and the execution output.`,
+- NEVER simulate tool execution with \`\`\`json\`\`\` blocks—use \`\`\`tool\`\`\` for JSON tool calls.
+- Only after all files are written/edited and verified, respond using clean Markdown summarizing what you created/modified and the execution output.`,
   };
 }
 
@@ -514,12 +518,12 @@ function App() {
               if (workspacePath) {
                 return {
                   role,
-                  content: `[SYSTEM CONTEXT: Workspace "${workspacePath}" is mounted. Use \`\`\`write_file: path\`\`\` or \`\`\`edit_file: path\`\`\` before running commands. You also have web_search and fetch_url.]\n\n${content}`,
+                  content: `[SYSTEM CONTEXT: Workspace "${workspacePath}" is mounted. Use \`\`\`write_file: path\`\`\` or \`\`\`edit_file: path\`\`\` before running commands. You also have web_search and fetch_url using \`\`\`tool\`\`\` blocks.]\n\n${content}`,
                 };
               } else {
                 return {
                   role,
-                  content: `[SYSTEM CONTEXT: No workspace is currently mounted. Do NOT output file or command blocks, but you MAY use web_search or fetch_url if needed.]\n\n${content}`,
+                  content: `[SYSTEM CONTEXT: No workspace is currently mounted. Do NOT output file or command blocks. If you need internet info, output ONLY a \`\`\`tool\`\`\` block with {"tool": "web_search", "query": "..."} or {"tool": "fetch_url", "url": "..."}.]\n\n${content}`,
                 };
               }
             }
@@ -616,18 +620,40 @@ function App() {
             continue;
           }
 
-          if (header === "tool") {
-            const jsonLines = body
-              .split(/\r?\n/)
-              .map((line) => line.trim())
-              .filter((line) => line.startsWith("{") && line.endsWith("}"));
-
-            if (jsonLines.length > 0) {
-              toolPayloads.push(...jsonLines);
-            } else {
-              toolPayloads.push(body.trim());
+          if (header === "tool" || header === "json" || header === "") {
+            try {
+              const obj = JSON.parse(body.trim());
+              if (obj && typeof obj === "object" && !Array.isArray(obj)) {
+                if (typeof obj.tool === "string") {
+                  toolPayloads.push(JSON.stringify(obj));
+                  continue;
+                }
+                if (typeof obj.query === "string" && !obj.tool) {
+                  toolPayloads.push(JSON.stringify({ tool: "web_search", query: obj.query }));
+                  continue;
+                }
+                if (typeof obj.url === "string" && !obj.tool) {
+                  toolPayloads.push(JSON.stringify({ tool: "fetch_url", url: obj.url }));
+                  continue;
+                }
+              }
+            } catch {
+              // Zwykły blok kodu JSON/tekst, nie pojedynczy obiekt narzędzia
             }
-            continue;
+
+            if (header === "tool") {
+              const jsonLines = body
+                .split(/\r?\n/)
+                .map((line) => line.trim())
+                .filter((line) => line.startsWith("{") && line.endsWith("}"));
+
+              if (jsonLines.length > 0) {
+                toolPayloads.push(...jsonLines);
+              } else {
+                toolPayloads.push(body.trim());
+              }
+              continue;
+            }
           }
 
           const lines = body.split(/\r?\n/);
