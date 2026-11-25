@@ -38,7 +38,7 @@ pub async fn list_workspace_files(workspace: String) -> Result<String, String> {
                 let path = entry.path();
                 let name = entry.file_name().to_string_lossy().to_string();
 
-                if name == "node_modules" || name == "target" || name == ".git" {
+                if name == "node_modules" || name == "target" || name == ".git" || name == "gen" {
                     continue;
                 }
 
@@ -63,8 +63,19 @@ pub async fn list_workspace_files(workspace: String) -> Result<String, String> {
 pub async fn read_workspace_file(workspace: String, relative_path: String) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let target = resolve_workspace_path(&workspace, &relative_path)?;
-        fs::read_to_string(&target)
-            .map_err(|e| format!("Failed to read '{}': {}", relative_path, e))
+        let content = fs::read_to_string(&target)
+            .map_err(|e| format!("Failed to read '{}': {}", relative_path, e))?;
+
+        const MAX_FILE_CHARS: usize = 12_000;
+        if content.chars().count() > MAX_FILE_CHARS {
+            let truncated: String = content.chars().take(MAX_FILE_CHARS).collect();
+            Ok(format!(
+                "{}\n\n... [TRUNCATED AT 12000 CHARS: File too large. Use search_files instead of reading the entire file.]",
+                truncated
+            ))
+        } else {
+            Ok(content)
+        }
     })
     .await
     .map_err(|e| format!("Task join error: {}", e))?
@@ -176,7 +187,7 @@ pub async fn search_workspace_files(
                 let path = entry.path();
                 let name = entry.file_name().to_string_lossy().to_string();
 
-                if name == "node_modules" || name == "target" || name == ".git" {
+                if name == "node_modules" || name == "target" || name == ".git" || name == "gen" {
                     continue;
                 }
 
@@ -233,13 +244,24 @@ pub async fn run_workspace_command(workspace: String, command: String) -> Result
             return Err("Workspace directory not found.".to_string());
         }
 
-        let mut cmd = Command::new("cmd");
-        cmd.args(["/C", &command])
-            .current_dir(base)
-            .stdin(Stdio::null());
-
         #[cfg(target_os = "windows")]
-        cmd.creation_flags(CREATE_NO_WINDOW);
+        let mut cmd = {
+            let mut c = Command::new("cmd");
+            c.args(["/C", &command])
+                .current_dir(base)
+                .stdin(Stdio::null())
+                .creation_flags(CREATE_NO_WINDOW);
+            c
+        };
+
+        #[cfg(not(target_os = "windows"))]
+        let mut cmd = {
+            let mut c = Command::new("sh");
+            c.args(["-c", &command])
+                .current_dir(base)
+                .stdin(Stdio::null());
+            c
+        };
 
         let output = cmd
             .output()
