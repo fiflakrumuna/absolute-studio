@@ -263,6 +263,23 @@ pub async fn run_workspace_command(workspace: String, command: String) -> Result
             c
         };
 
+        const DANGEROUS_PATTERNS: &[&str] = &[
+            "rm -rf", "rm -r", "rm -f", "del /f", "del /q", "rmdir /s",
+            "format ", "mkfs", "dd if=",
+            ":(){ :|:& };:",                     // fork bomb
+            "curl ", "wget ", "nc ", "ncat ",    // network exfiltration
+            "chmod 777", "chown ", "sudo ", "runas",
+        ];
+
+        fn is_dangerous_command(cmd: &str) -> bool {
+            let lower = cmd.to_lowercase();
+            DANGEROUS_PATTERNS.iter().any(|p| lower.contains(p))
+        }
+
+        if is_dangerous_command(&command) {
+            return Err("BLOCKED: dangerous command rejected by sandbox policy.".to_string());
+        }
+
         let output = cmd
             .output()
             .map_err(|e| format!("Failed to execute command: {}", e))?;
