@@ -24,6 +24,7 @@ pub fn run() {
             commands::files::search_workspace_files,
             commands::web::fetch_url,
             commands::web::web_search,
+            commands::files::check_command_policy,
 
         ])
         .run(tauri::generate_context!())

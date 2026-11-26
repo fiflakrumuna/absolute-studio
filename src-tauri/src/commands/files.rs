@@ -9,6 +9,109 @@ use std::os::windows::process::CommandExt;
 #[cfg(target_os = "windows")]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
+/// Polecenia absolutnie zabronione (nigdy nie mogą zostać wykonane, nawet za zgodą użytkownika)
+const HARD_BLOCKED_PATTERNS: &[(&str, &str)] = &[
+    ("format ", "Disk formatting is strictly prohibited."),
+    ("diskpart", "Disk partitioning utility is prohibited."),
+    ("mkfs", "Filesystem creation is prohibited."),
+    ("dd if=", "Raw block-device write is prohibited."),
+    (":(){ :|:& };:", "Fork bomb pattern detected."),
+    ("shutdown", "System shutdown/reboot is prohibited."),
+    ("restart-computer", "System reboot is prohibited."),
+    ("stop-computer", "System shutdown is prohibited."),
+    ("reg delete", "Windows Registry deletion is prohibited."),
+    ("bcdedit", "Boot configuration modification is prohibited."),
+    ("cipher /w", "Free-space wiping is prohibited."),
+    ("sudo ", "Privilege escalation (sudo) is prohibited."),
+    ("runas", "Privilege escalation (runas) is prohibited."),
+    ("chmod 777", "Insecure global permission change (777) is prohibited."),
+    ("chown ", "Ownership modification is prohibited."),
+    ("-encodedcommand", "Obfuscated PowerShell encoded command is prohibited."),
+    (" -enc ", "Obfuscated PowerShell encoded command is prohibited."),
+    ("iex(", "Remote script evaluation (Invoke-Expression) is prohibited."),
+    ("invoke-expression", "Dynamic script evaluation is prohibited."),
+];
+
+/// Polecenia podwyższonego ryzyka (wymagają wyraźnej zgody użytkownika przed każdym uruchomieniem)
+const HIGH_RISK_PATTERNS: &[(&str, &str)] = &[
+    ("rm -rf", "Recursive forced deletion (rm -rf)"),
+    ("rm -r", "Recursive file deletion (rm -r)"),
+    ("rm -f", "Forced file deletion (rm -f)"),
+    ("rmdir /s", "Recursive directory deletion (rmdir /s)"),
+    ("del /f", "Forced file deletion (del /f)"),
+    ("del /q", "Quiet mass file deletion (del /q)"),
+    ("remove-item", "PowerShell file/directory deletion (Remove-Item)"),
+    ("curl ", "External network request / data transfer (curl)"),
+    ("wget ", "External file download (wget)"),
+    ("invoke-webrequest", "External network request (Invoke-WebRequest)"),
+    ("iwr ", "External network request (iwr)"),
+    ("nc ", "Raw network socket connection (netcat)"),
+    ("ncat ", "Raw network socket connection (ncat)"),
+    ("ssh ", "Remote SSH connection"),
+    ("scp ", "Remote file transfer (scp)"),
+    ("git push", "Pushing changes to remote Git repository"),
+    ("git reset --hard", "Destructive Git history/working-tree reset"),
+    ("git clean -f", "Deleting untracked files via Git"),
+    ("npm publish", "Publishing package to public registry"),
+    ("cargo publish", "Publishing crate to public registry"),
+    ("pip install", "Installing global/environment Python packages"),
+    ("npm install -g", "Installing global Node packages"),
+    ("taskkill", "Terminating running system processes"),
+    ("kill -9", "Force-killing running processes"),
+];
+
+fn evaluate_command_security(command: &str) -> Result<Option<String>, String> {
+    let trimmed = command.trim();
+    if trimmed.is_empty() {
+        return Err("BLOCKED: Empty command.".to_string());
+    }
+
+    let lower = trimmed.to_lowercase();
+
+    // 1. Blokada ucieczki poza katalog workspace
+    if lower.contains("..")
+        || lower.starts_with("cd /")
+        || lower.starts_with("cd \\")
+        || lower.contains(" cd /")
+        || lower.contains(" cd \\")
+        || lower.contains("cd ~")
+    {
+        return Err(
+            "BLOCKED: Directory traversal outside the mounted workspace is prohibited by security policy."
+                .to_string(),
+        );
+    }
+
+    // 2. Twarda blokada poleceń destrukcyjnych / systemowych
+    for (pattern, reason) in HARD_BLOCKED_PATTERNS {
+        if lower.contains(pattern) {
+            return Err(format!("BLOCKED BY SANDBOX POLICY: {}", reason));
+        }
+    }
+
+    // 3. Wykrywanie poleceń wysokiego ryzyka (ostrzeżenie w oknie zgody)
+    let mut warnings = Vec::new();
+    for (pattern, desc) in HIGH_RISK_PATTERNS {
+        if lower.contains(pattern) {
+            warnings.push(*desc);
+        }
+    }
+
+    if warnings.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(warnings.join("; ")))
+    }
+}
+
+#[tauri::command]
+pub fn check_command_policy(command: String) -> Result<String, String> {
+    match evaluate_command_security(&command)? {
+        Some(warning) => Ok(format!("HIGH_RISK: {}", warning)),
+        None => Ok("STANDARD".to_string()),
+    }
+}
+
 fn resolve_workspace_path(workspace: &str, relative_path: &str) -> Result<PathBuf, String> {
     let base = Path::new(workspace);
     if !base.exists() || !base.is_dir() {
@@ -237,7 +340,20 @@ pub async fn search_workspace_files(
 }
 
 #[tauri::command]
-pub async fn run_workspace_command(workspace: String, command: String) -> Result<String, String> {
+pub async fn run_workspace_command(
+    workspace: String,
+    command: String,
+    approved_by_user: bool,
+) -> Result<String, String> {
+    if !approved_by_user {
+        return Err(
+            "BLOCKED: Execution requires explicit user approval before running.".to_string(),
+        );
+    }
+
+    // Ponowna weryfikacja polityki po stronie Rust (niezależnie od UI)
+    let _risk_note = evaluate_command_security(&command)?;
+
     let future = tauri::async_runtime::spawn_blocking(move || {
         let base = Path::new(&workspace);
         if !base.exists() || !base.is_dir() {
@@ -262,23 +378,6 @@ pub async fn run_workspace_command(workspace: String, command: String) -> Result
                 .stdin(Stdio::null());
             c
         };
-
-        const DANGEROUS_PATTERNS: &[&str] = &[
-            "rm -rf", "rm -r", "rm -f", "del /f", "del /q", "rmdir /s",
-            "format ", "mkfs", "dd if=",
-            ":(){ :|:& };:",                     // fork bomb
-            "curl ", "wget ", "nc ", "ncat ",    // network exfiltration
-            "chmod 777", "chown ", "sudo ", "runas",
-        ];
-
-        fn is_dangerous_command(cmd: &str) -> bool {
-            let lower = cmd.to_lowercase();
-            DANGEROUS_PATTERNS.iter().any(|p| lower.contains(p))
-        }
-
-        if is_dangerous_command(&command) {
-            return Err("BLOCKED: dangerous command rejected by sandbox policy.".to_string());
-        }
 
         let output = cmd
             .output()
